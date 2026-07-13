@@ -1,0 +1,61 @@
+// AL-TRON Gateway — Prisma schema
+//
+// Convention: every column is snake_case in Postgres (`@map`) and every
+// table is snake_case in Postgres (`@@map`), but the generated Prisma
+// Client — and therefore the rest of the TypeScript codebase — only ever
+// sees camelCase fields/models. Never reference a `@map`-ed column name
+// directly in application code.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Local shadow of an AUTH-PRO user, keyed by the id AUTH-PRO issues.
+/// AL-TRON never owns credentials — this table only exists so that other
+/// gateway-owned tables (e.g. AiRequestLog) have something to foreign-key
+/// against, and so user-scoped data can be queried without round-tripping
+/// to AUTH-PRO on every join.
+model User {
+  id                String   @id @map("id")
+  email             String   @unique @map("email")
+  avatarUrl         String?  @map("avatar_url")
+  metadata          Json?    @map("metadata")
+  isEmailVerified   Boolean  @default(false) @map("is_email_verified")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  aiRequests AiRequestLog[]
+
+  @@map("users")
+}
+
+enum AiRequestStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+
+  @@map("ai_request_status")
+}
+
+/// Audit trail for every prompt sent through the AI gateway endpoints —
+/// used for rate-limit accounting, cost tracking, and debugging agent runs.
+model AiRequestLog {
+  id             String          @id @default(uuid()) @map("id")
+  userId         String          @map("user_id")
+  model          String          @map("model")
+  promptTokens   Int             @default(0) @map("prompt_tokens")
+  completionTokens Int           @default(0) @map("completion_tokens")
+  status         AiRequestStatus @default(PENDING) @map("status")
+  errorMessage   String?         @map("error_message")
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("ai_request_logs")
+}
