@@ -27,6 +27,8 @@ export default () => ({
     ),
     defaultModel: process.env.GITHUB_MODELS_DEFAULT_MODEL ?? 'openai/gpt-4o-mini',
     embeddingModel: process.env.GITHUB_MODELS_EMBEDDING_MODEL ?? 'openai/text-embedding-3-small',
+    routerModel: process.env.GITHUB_MODELS_ROUTER_MODEL ?? 'openai/gpt-4o-mini',
+    specialistModel: process.env.GITHUB_MODELS_SPECIALIST_MODEL ?? 'openai/gpt-4o',
     timeoutMs: parseInt((process.env.GITHUB_MODELS_TIMEOUT_MS as string) ?? '30000', 10),
   },
 

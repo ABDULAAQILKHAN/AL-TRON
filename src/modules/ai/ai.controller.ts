@@ -18,7 +18,12 @@ export class AiController {
   constructor(private readonly aiService: AiService) {}
 
   @Post('prompt')
-  @ApiOperation({ summary: 'Run a prompt through the AI gateway (strict rate limit)' })
+  @ApiOperation({
+    summary:
+      'Run a prompt through the Router + Specialist AI gateway (strict rate limit). ' +
+      'A lightweight router model decides whether historical memory is needed; if so, a heavier ' +
+      'specialist model answers using the retrieved context, otherwise the router reply is returned directly.',
+  })
   @ApiEnvelopedOkResponse(PromptResponseDto)
   runPrompt(@CurrentUser() user: AuthUser, @Body() dto: PromptDto) {
     return this.aiService.runPrompt(user, dto);

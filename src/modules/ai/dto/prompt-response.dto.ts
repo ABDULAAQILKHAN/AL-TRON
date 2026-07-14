@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class PromptResponseDto {
   @ApiProperty({ description: 'AiRequestLog id, for audit/debugging' })
@@ -7,7 +7,7 @@ export class PromptResponseDto {
   @ApiProperty()
   completion: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'Model that produced `completion` (router or specialist)' })
   model: string;
 
   @ApiProperty()
@@ -15,4 +15,15 @@ export class PromptResponseDto {
 
   @ApiProperty()
   completionTokens: number;
+
+  @ApiProperty({
+    description:
+      'True if the router invoked query_historical_memory and the specialist model answered',
+  })
+  routed: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Number of memories retrieved and handed to the specialist, when routed',
+  })
+  memoriesUsed?: number;
 }
