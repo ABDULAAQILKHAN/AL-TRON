@@ -1,0 +1,52 @@
+{
+  "user": {
+    "name": "Aaqil Khan",
+    "role": "Associate Full Stack Software Development Engineer",
+    "location": "Indore, Madhya Pradesh, India",
+    "currentCompany": "Hammoq Infotech",
+    "previousCompany": "Techdome"
+  },
+  "preferences": {
+    "primaryStack": [
+      "React",
+      "Next.js",
+      "TypeScript",
+      "Tailwind CSS",
+      "Node.js",
+      "NestJS",
+      "FastAPI",
+      "Python",
+      "PostgreSQL",
+      "MongoDB"
+    ],
+    "environments": [
+      "macOS",
+      "Linux/Ubuntu",
+      "WSL2",
+      "Docker"
+    ],
+    "aiTooling": [
+      "Cursor IDE",
+      "OpenRouter",
+      "Continue.dev"
+    ],
+    "contentCreation": "Creator of the 'Code Exorcist' YouTube channel",
+    "mediaGenerationStyle": "Prefers high-contrast cinematic poster aesthetics and cinematic sports broadcast graphics"
+  },
+  "activeProjects": [
+    "AL-TRON (Agentic API Gateway with MongoDB Vector Search)",
+    "AUTH-PRO (Authentication, DB, and Cloud Storage Microservice)",
+    "Compare AI (Full-stack project with custom JWT and GCP Storage)"
+  ],
+  "strictCodingRules": [
+    "Strictly focus on resolving software bugs instead of generating new application outlines.",
+    "Always wrap JSON sorting utilities in the required HTML div wrapper for team deployments.",
+    "Do not use layout redesigns with images for personal markdown profiles."
+  ],
+  "personalContext": {
+    "relationships": [
+      "In a long-term relationship (3 years)",
+      "Brother (Upcoming wedding scheduled for December 3, 2026)"
+    ]
+  }
+}
