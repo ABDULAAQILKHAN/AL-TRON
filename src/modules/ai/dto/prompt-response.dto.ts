@@ -6,4 +6,13 @@ export class PromptResponseDto {
 
   @ApiProperty()
   completion: string;
+
+  @ApiProperty()
+  model: string;
+
+  @ApiProperty()
+  promptTokens: number;
+
+  @ApiProperty()
+  completionTokens: number;
 }

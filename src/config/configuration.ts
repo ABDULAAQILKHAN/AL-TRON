@@ -15,6 +15,13 @@ export default () => ({
     timeoutMs: parseInt(process.env.AUTH_PRO_TIMEOUT_MS as string, 10),
   },
 
+  githubModels: {
+    token: process.env.GITHUB_PAT,
+    baseUrl: (process.env.GITHUB_MODELS_BASE_URL ?? 'https://models.github.ai/inference').replace(/\/+$/, ''),
+    defaultModel: process.env.GITHUB_MODELS_DEFAULT_MODEL ?? 'openai/gpt-4o-mini',
+    timeoutMs: parseInt((process.env.GITHUB_MODELS_TIMEOUT_MS as string) ?? '30000', 10),
+  },
+
   throttle: {
     default: {
       ttl: parseInt(process.env.THROTTLE_DEFAULT_TTL_MS as string, 10),
