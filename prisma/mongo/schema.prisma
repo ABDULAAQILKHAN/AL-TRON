@@ -1,0 +1,32 @@
+// AL-TRON Memory Layer — separate Prisma schema because the datasource provider
+// (mongodb) differs from the main Postgres schema (prisma/schema.prisma), and a
+// single Prisma schema file can only declare one datasource. This generates its
+// own PrismaClient into ../../generated/mongo-client so it never collides with
+// the default @prisma/client generated from the Postgres schema.
+//
+// Convention (matches prisma/schema.prisma): DB fields are snake_case (`@map`),
+// Prisma Client fields are camelCase.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../generated/mongo-client"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGO_DB_URL")
+}
+
+/// A single ingested memory (agent action / observation) with its embedding,
+/// used for Agentic RAG retrieval via Atlas Vector Search.
+model Memory {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  source          String   @map("source")
+  action          String   @map("action")
+  textContent     String   @map("text_content")
+  vectorEmbedding Float[]  @map("vector_embedding")
+  metadata        Json?    @map("metadata")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("memories")
+}

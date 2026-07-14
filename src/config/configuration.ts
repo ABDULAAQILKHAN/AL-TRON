@@ -10,6 +10,10 @@ export default () => ({
     url: process.env.DATABASE_URL,
   },
 
+  mongo: {
+    url: process.env.MONGO_DB_URL,
+  },
+
   authPro: {
     baseUrl: (process.env.AUTH_PRO_BASE_URL ?? '').replace(/\/+$/, ''),
     timeoutMs: parseInt(process.env.AUTH_PRO_TIMEOUT_MS as string, 10),
@@ -17,9 +21,17 @@ export default () => ({
 
   githubModels: {
     token: process.env.GITHUB_PAT,
-    baseUrl: (process.env.GITHUB_MODELS_BASE_URL ?? 'https://models.github.ai/inference').replace(/\/+$/, ''),
+    baseUrl: (process.env.GITHUB_MODELS_BASE_URL ?? 'https://models.github.ai/inference').replace(
+      /\/+$/,
+      '',
+    ),
     defaultModel: process.env.GITHUB_MODELS_DEFAULT_MODEL ?? 'openai/gpt-4o-mini',
+    embeddingModel: process.env.GITHUB_MODELS_EMBEDDING_MODEL ?? 'openai/text-embedding-3-small',
     timeoutMs: parseInt((process.env.GITHUB_MODELS_TIMEOUT_MS as string) ?? '30000', 10),
+  },
+
+  memory: {
+    vectorSearchIndex: process.env.MEMORY_VECTOR_SEARCH_INDEX ?? 'memory_vector_index',
   },
 
   throttle: {

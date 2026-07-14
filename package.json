@@ -17,6 +17,9 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
+    "prisma:generate:mongo": "prisma generate --schema=prisma/mongo/schema.prisma",
+    "prisma:push:mongo": "prisma db push --schema=prisma/mongo/schema.prisma",
+    "prisma:studio:mongo": "prisma studio --schema=prisma/mongo/schema.prisma",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config ./test/jest-e2e.json"
@@ -36,6 +39,7 @@
     "form-data": "^4.0.1",
     "helmet": "^8.0.0",
     "joi": "^17.13.3",
+    "openai": "^6.46.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

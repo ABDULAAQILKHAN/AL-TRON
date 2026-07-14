@@ -14,7 +14,9 @@ import { AdminModule } from './modules/admin/admin.module';
 import { AiModule } from './modules/ai/ai.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { HealthModule } from './modules/health/health.module';
+import { MemoryModule } from './modules/memory/memory.module';
 import { UsersModule } from './modules/users/users.module';
+import { MongoPrismaModule } from './prisma/mongo-prisma.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
@@ -30,11 +32,13 @@ import { PrismaModule } from './prisma/prisma.module';
     }),
     GlobalHttpModule,
     PrismaModule,
+    MongoPrismaModule,
     AuthModule,
     UsersModule,
     AiModule,
     AdminModule,
     HealthModule,
+    MemoryModule,
   ],
   providers: [
     // Order matters: rate limiting runs before we bother verifying the caller with AUTH-PRO.
