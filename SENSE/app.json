@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "SENSE",
+    "slug": "sense",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "sense",
+    "backgroundColor": "#000000",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.altron.sense",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "AL-TRON needs the microphone to listen for the 'Altron' wake word and to hear your questions.",
+        "NSSpeechRecognitionUsageDescription": "AL-TRON uses on-device speech recognition to transcribe your questions into text."
+      }
+    },
+    "android": {
+      "package": "com.altron.sense",
+      "permissions": ["android.permission.RECORD_AUDIO"],
+      "adaptiveIcon": {
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-dev-client",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "AL-TRON needs the microphone to listen for the 'Altron' wake word and to hear your questions.",
+          "speechRecognitionPermission": "AL-TRON uses on-device speech recognition to transcribe your questions into text.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ]
+    ],
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
