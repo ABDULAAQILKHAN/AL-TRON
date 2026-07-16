@@ -4,7 +4,6 @@
   "main": "index.ts",
   "dependencies": {
     "@react-three/fiber": "^9.6.1",
-    "axios": "^1.18.1",
     "expo": "~57.0.4",
     "expo-application": "~57.0.0",
     "expo-asset": "~57.0.5",

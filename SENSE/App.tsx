@@ -3,7 +3,7 @@ import * as Speech from 'expo-speech';
 import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
-import axios from 'axios';
+import { fetch as expoFetch } from 'expo/fetch';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
 import {
@@ -21,6 +21,30 @@ import { base64ToUint8Array } from './services/hume/base64';
 // behind that prefix, only dev-time convenience values like these.
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://<YOUR_BACKEND_IP>:3000/ai/prompt';
 const MOCK_AUTH_TOKEN = process.env.EXPO_PUBLIC_MOCK_AUTH_TOKEN ?? 'mock-dev-token';
+// /ai/prompt/stream is the SSE sibling of /ai/prompt (see ai.controller.ts) -
+// same route, same auth, just chunked so interim status events can arrive
+// before the final result.
+const STREAM_URL = BACKEND_URL.replace(/\/prompt\/?$/, '/prompt/stream');
+
+// Mirrors ALTRON_ENGINE's PromptStatusStage ('remembering' | 'saving'),
+// plus 'thinking' which the backend emits the instant a request lands
+// (before the router has even decided which branch to take).
+type PromptStatusStage = 'thinking' | 'remembering' | 'saving';
+
+// Pre-synthesized once via Hume (same fixed voice as real responses - see
+// ALTRON_ENGINE/scripts/generate-filler-audio.js) and bundled as static
+// assets so playing one is instant, not another network round trip.
+const STATUS_FILLER_AUDIO: Record<PromptStatusStage, number> = {
+  thinking: require('./assets/audio/thinking.mp3'),
+  remembering: require('./assets/audio/remembering.mp3'),
+  saving: require('./assets/audio/saving.mp3'),
+};
+
+const PROCESSING_LABELS: Record<PromptStatusStage, string> = {
+  thinking: 'THINKING...',
+  remembering: 'REMEMBERING...',
+  saving: 'SAVING...',
+};
 
 // ALTRON_ENGINE now synthesizes speech server-side (Hume Octave TTS) and
 // returns it as base64 MP3 in the /ai/prompt response's `audio` field - the
@@ -175,6 +199,11 @@ export default function App() {
   // source each turn rather than constructing a new native player per turn.
   const ttsPlayer = useAudioPlayer();
   const ttsStatus = useAudioPlayerStatus(ttsPlayer);
+  // Separate player for the "thinking/remembering/saving" filler clips - kept
+  // apart from ttsPlayer so its own `didJustFinish` doesn't trip the "real
+  // response finished" effect below and snap the UI back to standby early.
+  const fillerPlayer = useAudioPlayer();
+  const [processingStage, setProcessingStage] = useState<PromptStatusStage | null>(null);
 
   // Refs mirror state that native event callbacks need to read without
   // forcing those callbacks to be re-created (and re-subscribed) every render.
@@ -258,6 +287,18 @@ export default function App() {
     setStatus('standby');
   }, [clearResetTimer, ttsPlayer]);
 
+  /** Plays the pre-generated filler clip for `stage` and updates the on-screen label to match. */
+  const speakStatus = useCallback(
+    (stage: PromptStatusStage) => {
+      console.log(`${LOG_TAG} status filler:`, stage);
+      setProcessingStage(stage);
+      fillerPlayer.pause();
+      fillerPlayer.replace(STATUS_FILLER_AUDIO[stage]);
+      fillerPlayer.play();
+    },
+    [fillerPlayer],
+  );
+
   // The player's own "finished" signal - matches expo-speech's old onDone callback.
   useEffect(() => {
     if (ttsStatus.didJustFinish) {
@@ -277,6 +318,8 @@ export default function App() {
   const speakResponse = useCallback(
     (text: string, audioBase64?: string) => {
       console.log(`${LOG_TAG} speaking response aloud`);
+      fillerPlayer.pause();
+      setProcessingStage(null);
       setStatus('speaking');
       shouldBeListeningRef.current = true;
       ExpoSpeechRecognitionModule.start(RECOGNITION_OPTIONS);
@@ -304,48 +347,99 @@ export default function App() {
 
       Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
     },
-    [clearResetTimer, finishSpeaking, ttsPlayer],
+    [clearResetTimer, fillerPlayer, finishSpeaking, ttsPlayer],
   );
 
+  /**
+   * Streams /ai/prompt/stream and reacts to each SSE frame as it arrives:
+   * `status` events play the matching pre-generated filler clip (via
+   * speakStatus) so the wait isn't silent, and the final `result` event
+   * hands off to speakResponse exactly like the old single-shot call did.
+   * expo/fetch (not RN's built-in fetch) is required here - it's the one
+   * that exposes a real, incrementally-readable `response.body` stream.
+   */
   const submitPrompt = useCallback(
     async (prompt: string) => {
       console.log(`${LOG_TAG} submitPrompt() ->`, JSON.stringify(prompt));
       shouldBeListeningRef.current = false;
       ExpoSpeechRecognitionModule.stop();
+      setProcessingStage(null);
       setStatus('transmitting');
 
-      try {
-        const { data } = await axios.post(
-          BACKEND_URL,
-          { prompt },
-          {
-            headers: {
-              Authorization: `Bearer ${MOCK_AUTH_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-            timeout: 30000,
-          },
-        );
+      const controller = new AbortController();
+      // Generous vs. the old 30s: the pipeline can chain a router call +
+      // memory search + specialist call, and status events already prove
+      // the connection is alive rather than the client sitting in the dark.
+      const abortTimer = setTimeout(() => controller.abort(), 45000);
 
-        // AL-TRON's TransformInterceptor wraps responses as { data: {...} };
-        // fall back to a flat shape too in case that ever changes.
-        const completion: string | undefined = data?.data?.completion ?? data?.completion;
-        const audio: string | undefined = data?.data?.audio ?? data?.audio;
-        console.log(`${LOG_TAG} gateway responded:`, completion, audio ? '(+audio)' : '(no audio)');
-        const text = completion || 'AL-TRON returned an empty response.';
-        setResponseText(text);
-        speakResponse(text, audio);
+      try {
+        const response = await expoFetch(STREAM_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${MOCK_AUTH_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ prompt }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`Gateway responded ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let gotResult = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let boundary = buffer.indexOf('\n\n');
+          while (boundary !== -1) {
+            const rawEvent = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            boundary = buffer.indexOf('\n\n');
+
+            const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data: '));
+            if (!dataLine) continue;
+            const event = JSON.parse(dataLine.slice('data: '.length));
+            console.log(`${LOG_TAG} stream event:`, event.type, event.stage ?? '');
+
+            if (event.type === 'status') {
+              speakStatus(event.stage as PromptStatusStage);
+            } else if (event.type === 'result') {
+              gotResult = true;
+              const completion: string | undefined = event.payload?.completion;
+              const audio: string | undefined = event.payload?.audio;
+              console.log(`${LOG_TAG} gateway responded:`, completion, audio ? '(+audio)' : '(no audio)');
+              const text = completion || 'AL-TRON returned an empty response.';
+              setResponseText(text);
+              speakResponse(text, audio);
+            } else if (event.type === 'error') {
+              throw new Error(event.message);
+            }
+          }
+        }
+
+        if (!gotResult) {
+          throw new Error('Gateway stream ended without a result');
+        }
       } catch (err) {
-        const message = axios.isAxiosError(err)
-          ? (err.response?.data?.message ?? err.message)
-          : (err as Error).message;
+        const message = (err as Error).name === 'AbortError' ? 'Gateway request timed out' : (err as Error).message;
         console.log(`${LOG_TAG} gateway request failed:`, message);
+        fillerPlayer.pause();
+        setProcessingStage(null);
         setErrorMessage(String(message));
         setStatus('error');
         scheduleReturnToStandby();
+      } finally {
+        clearTimeout(abortTimer);
       }
     },
-    [scheduleReturnToStandby, speakResponse],
+    [fillerPlayer, scheduleReturnToStandby, speakResponse, speakStatus],
   );
 
   /**
@@ -418,6 +512,7 @@ export default function App() {
       ExpoSpeechRecognitionModule.stop();
       void Speech.stop();
       ttsPlayer.pause();
+      fillerPlayer.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -517,6 +612,8 @@ export default function App() {
   });
 
   const config = STATUS_CONFIG[status];
+  const statusLabel =
+    status === 'transmitting' && processingStage ? PROCESSING_LABELS[processingStage] : config.label;
   const canDismiss = status === 'speaking' || status === 'error';
   const canTapToSpeak = status === 'standby';
   const showDebugTranscript =
@@ -554,7 +651,7 @@ export default function App() {
             status === 'acknowledging' ? styles.acknowledgingLabel : null,
           ]}
         >
-          {config.label}
+          {statusLabel}
         </Text>
         {canTapToSpeak ? <Text style={styles.tapHint}>TAP THE CIRCLE TO SPEAK MANUALLY</Text> : null}
 

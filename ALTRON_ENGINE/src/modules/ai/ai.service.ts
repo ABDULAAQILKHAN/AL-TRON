@@ -58,6 +58,15 @@ interface ChatCompletionResult {
   completionTokens: number;
 }
 
+/**
+ * Interim pipeline stages worth narrating to the user while they wait -
+ * 'thinking' is emitted by the controller itself the instant a request
+ * lands (covers the router call), these two cover the slower branches
+ * that follow it. Kept as a closed union so the client's status->filler-clip
+ * map can't silently miss a case.
+ */
+export type PromptStatusStage = 'remembering' | 'saving';
+
 const QUERY_HISTORICAL_MEMORY_TOOL_NAME = 'query_historical_memory';
 
 /** How many past memories the specialist gets when the router decides history is relevant. */
@@ -197,7 +206,7 @@ Behavioral Directives:
    *     the retrieved context to `specialistModel` (gpt-4o) for the real answer.
    *     Otherwise the router's own reply is returned as-is to save latency and tokens.
    */
-  async runPrompt(user: AuthUser, dto: PromptDto) {
+  async runPrompt(user: AuthUser, dto: PromptDto, onStatus?: (stage: PromptStatusStage) => void) {
     const routerModel = this.routerModel;
 
     const log = await this.prisma.aiRequestLog.create({
@@ -246,6 +255,7 @@ Behavioral Directives:
         this.logger.log(
           `[AI-ROUTER][${log.id}] << decision=SAVE_MEMORY args=${saveMemoryCall.function.arguments}`,
         );
+        onStatus?.('saving');
         return await this.finalizeTurn(
           user.id,
           dto.prompt,
@@ -257,6 +267,7 @@ Behavioral Directives:
         this.logger.log(
           `[AI-ROUTER][${log.id}] << decision=TOOL_CALL args=${queryMemoryCall.function.arguments} -> handing off to specialist "${this.specialistModel}"`,
         );
+        onStatus?.('remembering');
         return await this.finalizeTurn(
           user.id,
           dto.prompt,
