@@ -92,10 +92,20 @@ const SPEECH_RATE = 1.1;
 // Spoken locally the instant the wake word fires - NOT part of the model's
 // answer. Keep this in sync with ALTRON_ENGINE/src/modules/persona/persona.service.ts's
 // history of this list; the backend no longer injects a greeting into the
-// model's reply, so this is the only place it happens now.
-const WAKE_ACK_GREETINGS = ['hey bro', 'yes boss', 'boliye janab', 'kese h sir', 'hmmmmmmmmmm'];
+// model's reply, so this is the only place it happens now. Each greeting is
+// pre-synthesized via Hume (same fixed voice as everything else - see
+// ALTRON_ENGINE/scripts/generate-filler-audio.js) and bundled as a static
+// asset, so playing one on wake-word detection is instant and sounds like
+// AL-TRON rather than falling back to the device's native TTS voice.
+const WAKE_ACK_GREETINGS: { text: string; audio: number }[] = [
+  { text: 'hey bro', audio: require('./assets/audio/greetings/hey-bro.mp3') },
+  { text: 'yes boss', audio: require('./assets/audio/greetings/yes-boss.mp3') },
+  { text: 'boliye janab', audio: require('./assets/audio/greetings/boliye-janab.mp3') },
+  { text: 'kese h sir', audio: require('./assets/audio/greetings/kese-h-sir.mp3') },
+  { text: 'hmmmmmmmmmm', audio: require('./assets/audio/greetings/hmmmmmmmmmm.mp3') },
+];
 
-function pickRandomGreeting(): string {
+function pickRandomGreeting(): { text: string; audio: number } {
   return WAKE_ACK_GREETINGS[Math.floor(Math.random() * WAKE_ACK_GREETINGS.length)];
 }
 
@@ -199,10 +209,11 @@ export default function App() {
   // source each turn rather than constructing a new native player per turn.
   const ttsPlayer = useAudioPlayer();
   const ttsStatus = useAudioPlayerStatus(ttsPlayer);
-  // Separate player for the "thinking/remembering/saving" filler clips - kept
-  // apart from ttsPlayer so its own `didJustFinish` doesn't trip the "real
-  // response finished" effect below and snap the UI back to standby early.
-  const fillerPlayer = useAudioPlayer();
+  // Separate player for short pre-generated clips - wake-word greetings and
+  // the "thinking/remembering/saving" status fillers - kept apart from
+  // ttsPlayer so its own `didJustFinish` doesn't trip the "real response
+  // finished" effect below and snap the UI back to standby early.
+  const clipPlayer = useAudioPlayer();
   const [processingStage, setProcessingStage] = useState<PromptStatusStage | null>(null);
 
   // Refs mirror state that native event callbacks need to read without
@@ -292,11 +303,11 @@ export default function App() {
     (stage: PromptStatusStage) => {
       console.log(`${LOG_TAG} status filler:`, stage);
       setProcessingStage(stage);
-      fillerPlayer.pause();
-      fillerPlayer.replace(STATUS_FILLER_AUDIO[stage]);
-      fillerPlayer.play();
+      clipPlayer.pause();
+      clipPlayer.replace(STATUS_FILLER_AUDIO[stage]);
+      clipPlayer.play();
     },
-    [fillerPlayer],
+    [clipPlayer],
   );
 
   // The player's own "finished" signal - matches expo-speech's old onDone callback.
@@ -318,7 +329,7 @@ export default function App() {
   const speakResponse = useCallback(
     (text: string, audioBase64?: string) => {
       console.log(`${LOG_TAG} speaking response aloud`);
-      fillerPlayer.pause();
+      clipPlayer.pause();
       setProcessingStage(null);
       setStatus('speaking');
       shouldBeListeningRef.current = true;
@@ -347,7 +358,7 @@ export default function App() {
 
       Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
     },
-    [clearResetTimer, fillerPlayer, finishSpeaking, ttsPlayer],
+    [clearResetTimer, clipPlayer, finishSpeaking, ttsPlayer],
   );
 
   /**
@@ -430,7 +441,7 @@ export default function App() {
       } catch (err) {
         const message = (err as Error).name === 'AbortError' ? 'Gateway request timed out' : (err as Error).message;
         console.log(`${LOG_TAG} gateway request failed:`, message);
-        fillerPlayer.pause();
+        clipPlayer.pause();
         setProcessingStage(null);
         setErrorMessage(String(message));
         setStatus('error');
@@ -439,7 +450,7 @@ export default function App() {
         clearTimeout(abortTimer);
       }
     },
-    [fillerPlayer, scheduleReturnToStandby, speakResponse, speakStatus],
+    [clipPlayer, scheduleReturnToStandby, speakResponse, speakStatus],
   );
 
   /**
@@ -451,16 +462,18 @@ export default function App() {
   const triggerCapture = useCallback(
     (source: 'voice' | 'manual') => {
       const greeting = pickRandomGreeting();
-      console.log(`${LOG_TAG} capture triggered (${source}) - speaking "${greeting}", restarting mic for a clean session`);
+      console.log(`${LOG_TAG} capture triggered (${source}) - speaking "${greeting.text}", restarting mic for a clean session`);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       triggerWakeFlash();
-      Speech.speak(greeting, { pitch: SPEECH_PITCH, rate: SPEECH_RATE });
+      clipPlayer.pause();
+      clipPlayer.replace(greeting.audio);
+      clipPlayer.play();
       pendingCaptureStartRef.current = true;
       shouldBeListeningRef.current = true;
       setStatus('acknowledging');
       ExpoSpeechRecognitionModule.stop();
     },
-    [triggerWakeFlash],
+    [clipPlayer, triggerWakeFlash],
   );
 
   /** Manual trigger: tapping the standby badge instead of waiting to hear "Altron". */
@@ -512,7 +525,7 @@ export default function App() {
       ExpoSpeechRecognitionModule.stop();
       void Speech.stop();
       ttsPlayer.pause();
-      fillerPlayer.pause();
+      clipPlayer.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

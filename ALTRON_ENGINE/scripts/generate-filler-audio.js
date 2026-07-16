@@ -1,10 +1,11 @@
 /**
  * One-off dev script: pre-synthesizes AL-TRON's spoken filler phrases
- * ("thinking", "remembering", "saving") via Hume Octave TTS, using the exact
- * same fixed voice + description as HumeTtsService, and writes the MP3s
- * straight into ../SENSE/assets/audio/. Run manually whenever the filler
- * wording changes - these are bundled as static app assets, not synthesized
- * per-request, so the /ai/prompt/stream status events stay instant.
+ * ("thinking", "remembering", "saving") AND its wake-word acknowledgment
+ * greetings via Hume Octave TTS, using the exact same fixed voice +
+ * description as HumeTtsService, and writes the MP3s straight into
+ * ../SENSE/assets/audio/. Run manually whenever the wording changes - these
+ * are bundled as static app assets, not synthesized per-request, so both the
+ * /ai/prompt/stream status events and the wake-word ack stay instant.
  *
  * Usage: node scripts/generate-filler-audio.js
  */
@@ -20,12 +21,24 @@ const VOICE_DESCRIPTION =
 const FIXED_VOICE = { name: 'Fastidious Robo-Butler', provider: 'HUME_AI' };
 
 const OUTPUT_DIR = path.join(__dirname, '..', '..', 'SENSE', 'assets', 'audio');
+const GREETINGS_OUTPUT_DIR = path.join(OUTPUT_DIR, 'greetings');
 
 const PHRASES = {
   thinking: 'One second.',
   remembering: 'Pulling that from memory.',
   saving: 'Got it. Saving that now.',
 };
+
+// Keep this list in sync with WAKE_ACK_GREETINGS in SENSE/App.tsx - order
+// matters, since the app maps them to GREETING_AUDIO by index.
+const GREETINGS = ['hey bro', 'yes boss', 'boliye janab', 'kese h sir', 'hmmmmmmmmmm'];
+
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 async function synthesize(text) {
   const response = await fetch(HUME_TTS_URL, {
@@ -59,11 +72,21 @@ async function main() {
   }
 
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  fs.mkdirSync(GREETINGS_OUTPUT_DIR, { recursive: true });
 
   for (const [stage, text] of Object.entries(PHRASES)) {
     process.stdout.write(`Synthesizing "${stage}" ("${text}")... `);
     const mp3 = await synthesize(text);
     const outPath = path.join(OUTPUT_DIR, `${stage}.mp3`);
+    fs.writeFileSync(outPath, mp3);
+    console.log(`wrote ${outPath} (${mp3.length} bytes)`);
+  }
+
+  for (const text of GREETINGS) {
+    const slug = slugify(text);
+    process.stdout.write(`Synthesizing greeting "${text}" (${slug})... `);
+    const mp3 = await synthesize(text);
+    const outPath = path.join(GREETINGS_OUTPUT_DIR, `${slug}.mp3`);
     fs.writeFileSync(outPath, mp3);
     console.log(`wrote ${outPath} (${mp3.length} bytes)`);
   }
