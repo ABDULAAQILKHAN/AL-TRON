@@ -21,6 +21,9 @@ export const validationSchema = Joi.object({
 
   MEMORY_VECTOR_SEARCH_INDEX: Joi.string().default('memory_vector_index'),
 
+  REDIS_URL: Joi.string().uri().required(),
+  PERSONA_SESSION_TTL_SECONDS: Joi.number().default(21600),
+
   THROTTLE_DEFAULT_TTL_MS: Joi.number().default(60000),
   THROTTLE_DEFAULT_LIMIT: Joi.number().default(100),
   THROTTLE_AI_TTL_MS: Joi.number().default(60000),

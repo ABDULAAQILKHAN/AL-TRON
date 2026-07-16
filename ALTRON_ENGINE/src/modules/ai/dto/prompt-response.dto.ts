@@ -26,4 +26,14 @@ export class PromptResponseDto {
     description: 'Number of memories retrieved and handed to the specialist, when routed',
   })
   memoriesUsed?: number;
+
+  @ApiPropertyOptional({
+    description: 'True if the router invoked save_memory and a new memory was persisted',
+  })
+  memorySaved?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'id of the memory that was just saved, when memorySaved is true',
+  })
+  memoryId?: string;
 }

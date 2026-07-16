@@ -36,6 +36,15 @@ export default () => ({
     vectorSearchIndex: process.env.MEMORY_VECTOR_SEARCH_INDEX ?? 'memory_vector_index',
   },
 
+  redis: {
+    url: process.env.REDIS_URL,
+    // "Short-term" persona/history state expires instead of accumulating forever.
+    personaSessionTtlSeconds: parseInt(
+      (process.env.PERSONA_SESSION_TTL_SECONDS as string) ?? '21600',
+      10,
+    ),
+  },
+
   throttle: {
     default: {
       ttl: parseInt(process.env.THROTTLE_DEFAULT_TTL_MS as string, 10),

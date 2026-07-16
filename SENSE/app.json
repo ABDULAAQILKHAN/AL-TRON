@@ -18,7 +18,9 @@
     },
     "android": {
       "package": "com.altron.sense",
-      "permissions": ["android.permission.RECORD_AUDIO"],
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -38,7 +40,9 @@
             "com.google.android.googlequicksearchbox"
           ]
         }
-      ]
+      ],
+      "expo-audio",
+      "expo-asset"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

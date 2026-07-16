@@ -18,6 +18,7 @@ import { MemoryModule } from './modules/memory/memory.module';
 import { UsersModule } from './modules/users/users.module';
 import { MongoPrismaModule } from './prisma/mongo-prisma.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { RedisModule } from './redis/redis.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { PrismaModule } from './prisma/prisma.module';
     GlobalHttpModule,
     PrismaModule,
     MongoPrismaModule,
+    RedisModule,
     AuthModule,
     UsersModule,
     AiModule,

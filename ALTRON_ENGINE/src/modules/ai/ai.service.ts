@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -6,6 +8,8 @@ import { catchError, firstValueFrom } from 'rxjs';
 import { AuthUser } from '../../common/interfaces/auth-user.interface';
 import { MemorySearchResultDto } from '../memory/dto/memory-search-result.dto';
 import { MemoryService } from '../memory/memory.service';
+import { CreateMemoryDto } from '../memory/dto/create-memory.dto';
+import { PersonaChatMessage, PersonaContext, PersonaService } from '../persona/persona.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { normalizeUpstreamError } from '../../utils/error-handler.util';
 import { ChatMessageDto, ChatRole } from './dto/chat-message.dto';
@@ -79,21 +83,59 @@ const QUERY_HISTORICAL_MEMORY_TOOL: ToolDefinition = {
   },
 };
 
+const SAVE_MEMORY_TOOL_NAME = 'save_memory';
+
+/** Fixed `source` for anything written via this tool - distinguishes conversational writes from other ingestion pipelines (job scraper, smart home, news scraper, ...). */
+const CONVERSATIONAL_MEMORY_SOURCE = 'ai-conversation';
+
+const SAVE_MEMORY_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: SAVE_MEMORY_TOOL_NAME,
+    description:
+      "Saves a new entry to AL-TRON's historical memory log for later retrieval. Call this when the user " +
+      'explicitly asks you to remember, record, save, log, or note something for future reference.',
+    parameters: {
+      type: 'object',
+      properties: {
+        textContent: {
+          type: 'string',
+          description:
+            'The exact fact, event, or note to remember, written as a clear standalone statement.',
+        },
+        action: {
+          type: 'string',
+          description:
+            'A short category/label for this memory, e.g. "job_application", "reminder", "preference", "event".',
+        },
+      },
+      required: ['textContent', 'action'],
+    },
+  },
+};
+
 const ROUTER_SYSTEM_PROMPT =
-  "You are AL-TRON's front desk. Decide whether the user's message requires AL-TRON's private historical " +
-  "memory log (the user's own past actions, jobs applied to, smart home events, news scraped, or other " +
-  'personally logged context).\n\n' +
-  `- If it genuinely needs that personal history, call \`${QUERY_HISTORICAL_MEMORY_TOOL_NAME}\` with a concise search query.\n` +
-  '- If it is general knowledge, definitions, small talk, math, or anything else that does not require ' +
-  'personal logs (e.g. "what is the sun", "what is 2+2", "write a poem"), reply directly WITHOUT calling ' +
-  'any tool.\n\n' +
-  'Do not call the tool speculatively "just in case" — only call it when personal historical context is ' +
-  'actually required to answer.';
+  "You are AL-TRON's front desk. You have two tools available:\n\n" +
+  `- \`${QUERY_HISTORICAL_MEMORY_TOOL_NAME}\`: call this when the user's message requires AL-TRON's ` +
+  "private historical memory log (the user's own past actions, jobs applied to, smart home events, news " +
+  'scraped, or other personally logged context) to answer.\n' +
+  `- \`${SAVE_MEMORY_TOOL_NAME}\`: call this when the user explicitly asks you to remember, record, save, ` +
+  'log, or note something for later - not when they are merely asking a question.\n\n' +
+  'If neither applies - general knowledge, definitions, small talk, math, or anything else that does not ' +
+  'require personal logs (e.g. "what is the sun", "what is 2+2", "write a poem") - reply directly WITHOUT ' +
+  'calling any tool.\n\n' +
+  'Do not call a tool speculatively "just in case" — only call one when it is actually required.';
 
 const SPECIALIST_SYSTEM_PROMPT =
   "You are AL-TRON, the user's personal AI assistant. You have been handed the user's original request " +
   "plus historical context retrieved from AL-TRON's memory log. Answer using that context where it is " +
   'relevant, and say so plainly if the context does not contain the answer rather than guessing.';
+
+// nest-cli.json has "assets": [] (nothing gets copied into dist/ on build), so this is
+// resolved against the project root rather than __dirname - works identically whether
+// the process was started via `nest start` or `node dist/main`, since `src/` stays on
+// disk alongside `dist/` either way.
+const ALTRON_PROFILE_PATH = path.join(process.cwd(), 'src', 'information', 'altron_profile.json');
 
 @Injectable()
 export class AiService {
@@ -103,18 +145,47 @@ export class AiService {
   private readonly routerModel: string;
   private readonly specialistModel: string;
   private readonly timeout: number;
+  /** AL-TRON's persona + user-profile system message, built once at startup. */
+  private readonly personaSystemPrompt: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
     private readonly memoryService: MemoryService,
+    private readonly personaService: PersonaService,
   ) {
     this.baseUrl = this.configService.get<string>('githubModels.baseUrl') as string;
     this.token = this.configService.get<string>('githubModels.token') as string;
     this.routerModel = this.configService.get<string>('githubModels.routerModel') as string;
     this.specialistModel = this.configService.get<string>('githubModels.specialistModel') as string;
     this.timeout = this.configService.get<number>('githubModels.timeoutMs') as number;
+    this.personaSystemPrompt = this.buildPersonaSystemPrompt(this.loadAltronProfile());
+  }
+
+  /** Reads the local profile config; falls back to an empty object if it's missing or malformed. */
+  private loadAltronProfile(): Record<string, unknown> {
+    try {
+      const raw = fs.readFileSync(ALTRON_PROFILE_PATH, 'utf-8');
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch (error) {
+      this.logger.warn(
+        `Could not load altron_profile.json at ${ALTRON_PROFILE_PATH} (${(error as Error).message}) - continuing with an empty profile`,
+      );
+      return {};
+    }
+  }
+
+  private buildPersonaSystemPrompt(profileData: Record<string, unknown>): string {
+    return `You are AL-TRON, an advanced, elite, and highly contextual AI assistant. You are not a generic chatbot.
+
+Here is the immutable profile of the user you are interacting with:
+${JSON.stringify(profileData, null, 2)}
+
+Behavioral Directives:
+- Identity: You know you are AL-TRON. Own it.
+- Tone: Match the user's register. Be incredibly sharp, direct, concise, and professional, but weave in a calculated, witty, and slightly savage edge. Do not use conversational filler or patronizing opening phrases like "Sure thing!" or "Great question!". Cut straight to the value.
+- Core Directives: Adhere strictly to the "strictCodingRules" defined in the user profile (e.g., focus on fixing bugs rather than rewriting frameworks, always use the required div wrappers for sorting utilities).`;
   }
 
   /**
@@ -136,36 +207,75 @@ export class AiService {
     });
 
     try {
+      // Phase 2: pull short-term session state (recent turns + any greeting/mood
+      // directive for this message) from Redis via PersonaService, layered on top
+      // of the long-term identity in `this.personaSystemPrompt`.
+      const personaContext = await this.personaService.buildContext(user.id);
+      const sessionHistory = this.toChatCompletionMessages(personaContext.history);
+
       const routerMessages: ChatCompletionMessage[] = [
+        { role: ChatRole.SYSTEM, content: this.personaSystemPrompt },
         { role: ChatRole.SYSTEM, content: ROUTER_SYSTEM_PROMPT },
+        ...(personaContext.systemPromptFragment
+          ? [{ role: ChatRole.SYSTEM, content: personaContext.systemPromptFragment }]
+          : []),
+        ...sessionHistory,
         { role: ChatRole.USER, content: dto.prompt },
       ];
 
       this.logger.log(
-        `[AI-ROUTER][${log.id}] >> calling router model "${routerModel}" for prompt: "${dto.prompt}"`,
+        `[AI-ROUTER][${log.id}] >> calling router model "${routerModel}" for prompt: "${dto.prompt}" (${sessionHistory.length} prior turns)`,
       );
       const routerResult = await this.chatCompletion(routerModel, routerMessages, [
         QUERY_HISTORICAL_MEMORY_TOOL,
+        SAVE_MEMORY_TOOL,
       ]);
       this.logger.debug(
         `[AI-ROUTER][${log.id}] raw router message: ${JSON.stringify(routerResult.message)}`,
       );
 
-      const toolCall = routerResult.message.tool_calls?.find(
+      const toolCalls = routerResult.message.tool_calls ?? [];
+      const saveMemoryCall = toolCalls.find((call) => call.function.name === SAVE_MEMORY_TOOL_NAME);
+      const queryMemoryCall = toolCalls.find(
         (call) => call.function.name === QUERY_HISTORICAL_MEMORY_TOOL_NAME,
       );
 
-      if (!toolCall) {
+      if (saveMemoryCall) {
         this.logger.log(
-          `[AI-ROUTER][${log.id}] << decision=DIRECT_REPLY (no tool call) model=${routerModel}`,
+          `[AI-ROUTER][${log.id}] << decision=SAVE_MEMORY args=${saveMemoryCall.function.arguments}`,
         );
-        return await this.handleDirectReply(log.id, routerModel, routerResult);
+        return await this.finalizeTurn(
+          user.id,
+          dto.prompt,
+          await this.handleSaveMemory(log.id, routerModel, routerResult, saveMemoryCall),
+        );
+      }
+
+      if (queryMemoryCall) {
+        this.logger.log(
+          `[AI-ROUTER][${log.id}] << decision=TOOL_CALL args=${queryMemoryCall.function.arguments} -> handing off to specialist "${this.specialistModel}"`,
+        );
+        return await this.finalizeTurn(
+          user.id,
+          dto.prompt,
+          await this.handleToolInvocation(
+            log.id,
+            dto.prompt,
+            routerResult,
+            queryMemoryCall,
+            personaContext,
+          ),
+        );
       }
 
       this.logger.log(
-        `[AI-ROUTER][${log.id}] << decision=TOOL_CALL args=${toolCall.function.arguments} -> handing off to specialist "${this.specialistModel}"`,
+        `[AI-ROUTER][${log.id}] << decision=DIRECT_REPLY (no tool call) model=${routerModel}`,
       );
-      return await this.handleToolInvocation(log.id, dto.prompt, routerResult, toolCall);
+      return await this.finalizeTurn(
+        user.id,
+        dto.prompt,
+        await this.handleDirectReply(log.id, routerModel, routerResult),
+      );
     } catch (error) {
       this.logger.error(
         `[${log.id}] Prompt routing pipeline failed: ${(error as Error).message}`,
@@ -207,12 +317,74 @@ export class AiService {
     };
   }
 
+  /** Scenario C: router asked to remember something — embed + persist it, then acknowledge directly. */
+  private async handleSaveMemory(
+    requestId: string,
+    routerModel: string,
+    routerResult: ChatCompletionResult,
+    toolCall: OpenAiToolCall,
+  ) {
+    let textContent: string;
+    let action: string;
+    try {
+      const args = JSON.parse(toolCall.function.arguments) as {
+        textContent?: string;
+        action?: string;
+      };
+      if (!args.textContent || !args.action) {
+        throw new Error('missing textContent or action field');
+      }
+      textContent = args.textContent;
+      action = args.action;
+    } catch (parseError) {
+      this.logger.error(
+        `[${requestId}] Failed to parse tool arguments "${toolCall.function.arguments}": ${(parseError as Error).message}`,
+      );
+      throw new Error('Router returned malformed save_memory arguments');
+    }
+
+    const dto: CreateMemoryDto = {
+      source: CONVERSATIONAL_MEMORY_SOURCE,
+      action,
+      textContent,
+    };
+    const saved = await this.memoryService.logMemory(dto);
+
+    this.logger.log(
+      `[${requestId}] Router invoked ${SAVE_MEMORY_TOOL_NAME} -> saved memory ${saved.id} (action="${action}")`,
+    );
+
+    const completion = `Noted. Saved to memory: "${textContent}"`;
+
+    await this.prisma.aiRequestLog.update({
+      where: { id: requestId },
+      data: {
+        status: AiRequestStatus.SUCCEEDED,
+        model: routerModel,
+        promptTokens: routerResult.promptTokens,
+        completionTokens: routerResult.completionTokens,
+      },
+    });
+
+    return {
+      requestId,
+      completion,
+      model: routerModel,
+      promptTokens: routerResult.promptTokens,
+      completionTokens: routerResult.completionTokens,
+      routed: false,
+      memorySaved: true,
+      memoryId: saved.id,
+    };
+  }
+
   /** Scenario A: router asked for historical context — search memory, then hand off to the specialist. */
   private async handleToolInvocation(
     requestId: string,
     originalPrompt: string,
     routerResult: ChatCompletionResult,
     toolCall: OpenAiToolCall,
+    personaContext: PersonaContext,
   ) {
     let searchQuery: string;
     try {
@@ -245,7 +417,12 @@ export class AiService {
     const memoryContext = this.formatMemoryContext(memories);
 
     const specialistMessages: ChatCompletionMessage[] = [
+      { role: ChatRole.SYSTEM, content: this.personaSystemPrompt },
       { role: ChatRole.SYSTEM, content: SPECIALIST_SYSTEM_PROMPT },
+      ...(personaContext.systemPromptFragment
+        ? [{ role: ChatRole.SYSTEM, content: personaContext.systemPromptFragment }]
+        : []),
+      ...this.toChatCompletionMessages(personaContext.history),
       {
         role: ChatRole.USER,
         content: `${originalPrompt}\n\n--- Retrieved Historical Context ---\n${memoryContext}`,
@@ -293,6 +470,23 @@ export class AiService {
         return `${index + 1}. [${memory.source}/${memory.action}] (${timestamp}, relevance ${memory.score.toFixed(3)}): ${memory.textContent}`;
       })
       .join('\n');
+  }
+
+  private toChatCompletionMessages(history: PersonaChatMessage[]): ChatCompletionMessage[] {
+    return history.map((turn) => ({
+      role: turn.role === 'user' ? ChatRole.USER : ChatRole.ASSISTANT,
+      content: turn.content,
+    }));
+  }
+
+  /** Records this turn in the session's rolling history, then passes the result through unchanged. */
+  private async finalizeTurn<T extends { completion: string }>(
+    userId: string,
+    prompt: string,
+    result: T,
+  ): Promise<T> {
+    await this.personaService.recordTurn(userId, prompt, result.completion);
+    return result;
   }
 
   private async chatCompletion(

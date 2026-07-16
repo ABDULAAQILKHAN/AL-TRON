@@ -4,12 +4,15 @@ import { StatusBar } from 'expo-status-bar';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import axios from 'axios';
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
   type ExpoSpeechRecognitionErrorCode,
   type ExpoSpeechRecognitionOptions,
 } from 'expo-speech-recognition';
+import AltronOrb3D, { type OrbVoiceState } from './components/AltronOrb3D';
+import { synthesizeSpeech } from './services/hume/humeTts';
 
 // --- Gateway config ------------------------------------------------------
 // Both values come from `.env` (see `.env.example`). EXPO_PUBLIC_* vars are
@@ -17,6 +20,9 @@ import {
 // behind that prefix, only dev-time convenience values like these.
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://<YOUR_BACKEND_IP>:3000/ai/prompt';
 const MOCK_AUTH_TOKEN = process.env.EXPO_PUBLIC_MOCK_AUTH_TOKEN ?? 'mock-dev-token';
+// Hume Octave TTS - see services/hume/humeTts.ts. Empty means the app falls
+// back to the device's built-in voice (see speakResponse's catch block).
+const HUME_API_KEY = process.env.EXPO_PUBLIC_HUME_API_KEY ?? '';
 
 // "Altron" isn't a real word, and it's acoustically near-identical to
 // "Ultron" (a very well-known proper noun from the Avengers films) - on-device
@@ -36,9 +42,37 @@ const AUTO_RESET_MS = 6000;
 // than the platform default (1.0 / 1.0).
 const SPEECH_PITCH = 0.9;
 const SPEECH_RATE = 1.1;
+
+// Spoken locally the instant the wake word fires - NOT part of the model's
+// answer. Keep this in sync with ALTRON_ENGINE/src/modules/persona/persona.service.ts's
+// history of this list; the backend no longer injects a greeting into the
+// model's reply, so this is the only place it happens now.
+const WAKE_ACK_GREETINGS = ['hey bro', 'yes boss', 'boliye janab', 'kese h sir', 'hmmmmmmmmmm'];
+
+function pickRandomGreeting(): string {
+  return WAKE_ACK_GREETINGS[Math.floor(Math.random() * WAKE_ACK_GREETINGS.length)];
+}
+
 // Safety net in case Speech.speak()'s onDone/onError never fire for some
-// reason - long enough to never cut off a real response early.
-const SPEAKING_FALLBACK_MS = 20000;
+// reason. A fixed value here is a trap: any response long enough to speak
+// past it gets cut off mid-sentence, which is exactly what happened with a
+// ~75-word reply (dates and dollar figures get spoken out in full, which is
+// much slower than reading the text). Scale the timeout to the actual text
+// instead, with a floor for short replies and a ceiling so a genuinely
+// broken onDone can't hang the UI forever.
+const SPEAKING_FALLBACK_MIN_MS = 10000;
+const SPEAKING_FALLBACK_MAX_MS = 90000;
+const SPEAKING_FALLBACK_BUFFER_MS = 6000;
+// Conservative words/sec estimate - real TTS throughput varies by engine and
+// dips further on numbers/punctuation, so this deliberately underestimates
+// speed (overestimates duration) rather than risk cutting speech off again.
+const SPEECH_WORDS_PER_SECOND = 2.2;
+
+function estimateSpeakingDurationMs(text: string): number {
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  const estimatedMs = (wordCount / SPEECH_WORDS_PER_SECOND) * 1000 + SPEAKING_FALLBACK_BUFFER_MS;
+  return Math.min(SPEAKING_FALLBACK_MAX_MS, Math.max(SPEAKING_FALLBACK_MIN_MS, estimatedMs));
+}
 
 // Prefix every debug log so they're easy to grep out of Metro's console noise.
 const LOG_TAG = '[SENSE]';
@@ -58,7 +92,14 @@ const RECOGNITION_OPTIONS: ExpoSpeechRecognitionOptions = {
   interimResults: true,
   continuous: true,
   contextualStrings: ['Altron'],
+  volumeChangeEventOptions: { enabled: true, intervalMillis: 100 },
 };
+
+// expo-speech-recognition's `volumechange` reports roughly -2 (inaudible) to
+// 10 (loud) - normalize to 0..1 for the orb's `amplitude` prop.
+function normalizeMicVolume(value: number): number {
+  return Math.max(0, Math.min(1, (value + 2) / 12));
+}
 
 type GatewayStatus =
   | 'initializing'
@@ -69,15 +110,32 @@ type GatewayStatus =
   | 'speaking'
   | 'error';
 
-const STATUS_CONFIG: Record<GatewayStatus, { icon: string; label: string; accent: string }> = {
-  initializing: { icon: '⚙️', label: 'INITIALIZING SYSTEMS', accent: '#555555' },
-  standby: { icon: '🔵', label: "STANDBY // LISTENING FOR 'ALTRON'", accent: '#2E9BFF' },
-  acknowledging: { icon: '🟣', label: 'YES, BOSS', accent: '#B388FF' },
-  active: { icon: '🔴', label: 'ACTIVE // RECORDING YOUR PROMPT', accent: '#FF3B4C' },
-  transmitting: { icon: '🟡', label: 'PROCESSING // TALKING TO THE GATEWAY', accent: '#F5C542' },
-  speaking: { icon: '🔊', label: 'SPEAKING...', accent: '#5EEAD4' },
-  error: { icon: '⛔', label: 'SYSTEM FAULT', accent: '#FF3B4C' },
+const STATUS_CONFIG: Record<GatewayStatus, { label: string; accent: string }> = {
+  initializing: { label: 'INITIALIZING SYSTEMS', accent: '#555555' },
+  standby: { label: "STANDBY // LISTENING FOR 'ALTRON'", accent: '#2E9BFF' },
+  acknowledging: { label: 'YES, BOSS', accent: '#B388FF' },
+  active: { label: 'ACTIVE // RECORDING YOUR PROMPT', accent: '#FF3B4C' },
+  transmitting: { label: 'PROCESSING // TALKING TO THE GATEWAY', accent: '#F5C542' },
+  speaking: { label: 'SPEAKING...', accent: '#5EEAD4' },
+  error: { label: 'SYSTEM FAULT', accent: '#FF3B4C' },
 };
+
+/** Drives AltronOrb3D's animation - maps the app's state machine onto the orb's voice-state vocabulary. */
+function toOrbVoiceState(status: GatewayStatus): OrbVoiceState {
+  switch (status) {
+    case 'active':
+    case 'acknowledging':
+      return 'listening';
+    case 'transmitting':
+      return 'thinking';
+    case 'speaking':
+      return 'speaking';
+    case 'error':
+      return 'disconnected';
+    default:
+      return 'idle';
+  }
+}
 
 export default function App() {
   const [status, setStatus] = useState<GatewayStatus>('initializing');
@@ -85,6 +143,16 @@ export default function App() {
   const [activePrompt, setActivePrompt] = useState('');
   const [responseText, setResponseText] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  // Drives AltronOrb3D's audio-reactive scale/glow/displacement. Reflects the
+  // mic's input level (real signal while the user is talking); during
+  // 'speaking' this is ambient/echo level, not the TTS output's own level -
+  // Hume's own playback amplitude will be the correct source for that once wired in.
+  const [micAmplitude, setMicAmplitude] = useState(0);
+
+  // Single reused player for Hume TTS responses - `.replace()` swaps the
+  // source each turn rather than constructing a new native player per turn.
+  const ttsPlayer = useAudioPlayer();
+  const ttsStatus = useAudioPlayerStatus(ttsPlayer);
 
   // Refs mirror state that native event callbacks need to read without
   // forcing those callbacks to be re-created (and re-subscribed) every render.
@@ -156,49 +224,64 @@ export default function App() {
    * out, or was dismissed by a tap. Always stops any in-flight speech (a
    * harmless no-op if it already finished) and hands back to standby - the
    * mic was already running for barge-in detection throughout, so unlike
-   * `returnToStandby` this does NOT need to restart it.
+   * `returnToStandby` this does NOT need to restart it. Stops both the Hume
+   * player and the expo-speech fallback since either could be the one active.
    */
   const finishSpeaking = useCallback(() => {
     console.log(`${LOG_TAG} finishSpeaking()`);
     void Speech.stop();
+    ttsPlayer.pause();
     clearResetTimer();
     setResponseText('');
     setStatus('standby');
-  }, [clearResetTimer]);
+  }, [clearResetTimer, ttsPlayer]);
 
-  /** Speaks `text` aloud while keeping the mic live so "Altron" can barge in. */
+  // The player's own "finished" signal - matches expo-speech's old onDone callback.
+  useEffect(() => {
+    if (ttsStatus.didJustFinish) {
+      console.log(`${LOG_TAG} speech finished`);
+      finishSpeaking();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsStatus.didJustFinish]);
+
+  /**
+   * Speaks `text` aloud via Hume's Octave TTS while keeping the mic live so
+   * "Altron" can barge in. Falls back to the device's built-in voice if the
+   * Hume request fails (bad/missing key, network, quota) so a Hume outage
+   * means a robotic voice, not total silence.
+   */
   const speakResponse = useCallback(
-    (text: string) => {
+    async (text: string) => {
       console.log(`${LOG_TAG} speaking response aloud`);
       setStatus('speaking');
       shouldBeListeningRef.current = true;
       ExpoSpeechRecognitionModule.start(RECOGNITION_OPTIONS);
 
+      const fallbackMs = estimateSpeakingDurationMs(text);
+      console.log(`${LOG_TAG} speaking fallback timeout set to ${fallbackMs}ms for ${text.length} chars`);
       clearResetTimer();
       resetTimerRef.current = setTimeout(() => {
         console.log(`${LOG_TAG} speaking fallback timeout - forcing reset`);
         finishSpeaking();
-      }, SPEAKING_FALLBACK_MS);
+      }, fallbackMs);
 
-      Speech.speak(text, {
-        pitch: SPEECH_PITCH,
-        rate: SPEECH_RATE,
-        onDone: () => {
-          console.log(`${LOG_TAG} speech finished`);
-          finishSpeaking();
-        },
-        onStopped: () => {
-          // Fires from our own Speech.stop() calls (barge-in or tap-to-skip);
-          // whichever caller stopped it already owns the resulting state change.
-          console.log(`${LOG_TAG} speech stopped`);
-        },
-        onError: (error) => {
-          console.log(`${LOG_TAG} speech error:`, error.message);
-          finishSpeaking();
-        },
-      });
+      if (!HUME_API_KEY) {
+        console.log(`${LOG_TAG} no EXPO_PUBLIC_HUME_API_KEY set - using device voice`);
+        Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
+        return;
+      }
+
+      try {
+        const { uri } = await synthesizeSpeech(HUME_API_KEY, text, SPEECH_RATE);
+        ttsPlayer.replace({ uri });
+        ttsPlayer.play();
+      } catch (error) {
+        console.log(`${LOG_TAG} Hume TTS failed, falling back to device voice:`, (error as Error).message);
+        Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
+      }
     },
-    [clearResetTimer, finishSpeaking],
+    [clearResetTimer, finishSpeaking, ttsPlayer],
   );
 
   const submitPrompt = useCallback(
@@ -227,7 +310,7 @@ export default function App() {
         console.log(`${LOG_TAG} gateway responded:`, completion);
         const text = completion || 'AL-TRON returned an empty response.';
         setResponseText(text);
-        speakResponse(text);
+        void speakResponse(text);
       } catch (err) {
         const message = axios.isAxiosError(err)
           ? (err.response?.data?.message ?? err.message)
@@ -249,9 +332,11 @@ export default function App() {
    */
   const triggerCapture = useCallback(
     (source: 'voice' | 'manual') => {
-      console.log(`${LOG_TAG} capture triggered (${source}) - acknowledging + restarting mic for a clean session`);
+      const greeting = pickRandomGreeting();
+      console.log(`${LOG_TAG} capture triggered (${source}) - speaking "${greeting}", restarting mic for a clean session`);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       triggerWakeFlash();
+      Speech.speak(greeting, { pitch: SPEECH_PITCH, rate: SPEECH_RATE });
       pendingCaptureStartRef.current = true;
       shouldBeListeningRef.current = true;
       setStatus('acknowledging');
@@ -282,6 +367,14 @@ export default function App() {
           setStatus('error');
           return;
         }
+        // iOS: allows the mic and TTS playback to run concurrently - without
+        // this, barge-in (hearing "Altron" while Hume's response is playing)
+        // may not work correctly.
+        await setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: 'mixWithOthers',
+        });
         shouldBeListeningRef.current = true;
         setStatus('standby');
         ExpoSpeechRecognitionModule.start(RECOGNITION_OPTIONS);
@@ -300,6 +393,7 @@ export default function App() {
       clearResetTimer();
       ExpoSpeechRecognitionModule.stop();
       void Speech.stop();
+      ttsPlayer.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -338,6 +432,10 @@ export default function App() {
     ExpoSpeechRecognitionModule.start(RECOGNITION_OPTIONS);
   });
 
+  useSpeechRecognitionEvent('volumechange', (event) => {
+    setMicAmplitude(normalizeMicVolume(event.value));
+  });
+
   useSpeechRecognitionEvent('error', (event) => {
     console.log(`${LOG_TAG} recognition error:`, event.error, event.message);
     if (!FATAL_SPEECH_ERRORS.has(event.error)) {
@@ -367,6 +465,7 @@ export default function App() {
       if (statusRef.current === 'speaking') {
         console.log(`${LOG_TAG} barge-in - cutting off speech`);
         void Speech.stop();
+        ttsPlayer.pause();
       }
       triggerCapture('voice');
       return;
@@ -418,12 +517,11 @@ export default function App() {
           disabled={!canTapToSpeak}
           onPress={startManualListening}
           style={({ pressed }) => [
-            styles.statusBadge,
-            { borderColor: config.accent },
+            styles.orbWrapper,
             canTapToSpeak && pressed ? styles.statusBadgePressed : null,
           ]}
         >
-          <Text style={styles.statusIcon}>{config.icon}</Text>
+          <AltronOrb3D voiceState={toOrbVoiceState(status)} amplitude={micAmplitude} />
         </Pressable>
         <Text
           style={[
@@ -504,21 +602,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
-  statusBadge: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
+  orbWrapper: {
     marginBottom: 28,
   },
   statusBadgePressed: {
     opacity: 0.6,
     transform: [{ scale: 0.96 }],
-  },
-  statusIcon: {
-    fontSize: 48,
   },
   statusLabel: {
     fontSize: 14,
