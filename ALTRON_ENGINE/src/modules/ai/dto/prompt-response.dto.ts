@@ -36,4 +36,11 @@ export class PromptResponseDto {
     description: 'id of the memory that was just saved, when memorySaved is true',
   })
   memoryId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Base64-encoded MP3 of `completion` synthesized via Hume Octave TTS (fixed voice). ' +
+      'Absent if speech synthesis failed - clients should fall back to on-device TTS in that case.',
+  })
+  audio?: string;
 }

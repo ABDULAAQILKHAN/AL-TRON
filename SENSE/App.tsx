@@ -5,6 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import axios from 'axios';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { File, Paths } from 'expo-file-system';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
@@ -12,7 +13,7 @@ import {
   type ExpoSpeechRecognitionOptions,
 } from 'expo-speech-recognition';
 import AltronOrb3D, { type OrbVoiceState } from './components/AltronOrb3D';
-import { synthesizeSpeech } from './services/hume/humeTts';
+import { base64ToUint8Array } from './services/hume/base64';
 
 // --- Gateway config ------------------------------------------------------
 // Both values come from `.env` (see `.env.example`). EXPO_PUBLIC_* vars are
@@ -20,9 +21,30 @@ import { synthesizeSpeech } from './services/hume/humeTts';
 // behind that prefix, only dev-time convenience values like these.
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://<YOUR_BACKEND_IP>:3000/ai/prompt';
 const MOCK_AUTH_TOKEN = process.env.EXPO_PUBLIC_MOCK_AUTH_TOKEN ?? 'mock-dev-token';
-// Hume Octave TTS - see services/hume/humeTts.ts. Empty means the app falls
-// back to the device's built-in voice (see speakResponse's catch block).
-const HUME_API_KEY = process.env.EXPO_PUBLIC_HUME_API_KEY ?? '';
+
+// ALTRON_ENGINE now synthesizes speech server-side (Hume Octave TTS) and
+// returns it as base64 MP3 in the /ai/prompt response's `audio` field - the
+// app no longer holds a Hume API key at all. `writeAudioToTempFile` just
+// decodes+writes whatever the backend already gave us.
+let previousAudioFileUri: string | null = null;
+let audioFileCounter = 0;
+
+function writeAudioToTempFile(base64Mp3: string): string {
+  const bytes = base64ToUint8Array(base64Mp3);
+  audioFileCounter += 1;
+  const file = new File(Paths.cache, `altron-response-${Date.now()}-${audioFileCounter}.mp3`);
+  file.write(bytes);
+
+  if (previousAudioFileUri) {
+    try {
+      new File(previousAudioFileUri).delete();
+    } catch {
+      // Best-effort cleanup - cache dir is OS-evictable anyway.
+    }
+  }
+  previousAudioFileUri = file.uri;
+  return file.uri;
+}
 
 // "Altron" isn't a real word, and it's acoustically near-identical to
 // "Ultron" (a very well-known proper noun from the Avengers films) - on-device
@@ -246,13 +268,14 @@ export default function App() {
   }, [ttsStatus.didJustFinish]);
 
   /**
-   * Speaks `text` aloud via Hume's Octave TTS while keeping the mic live so
+   * Plays `audioBase64` (Hume Octave TTS, synthesized server-side by
+   * ALTRON_ENGINE - see finalizeTurn there) while keeping the mic live so
    * "Altron" can barge in. Falls back to the device's built-in voice if the
-   * Hume request fails (bad/missing key, network, quota) so a Hume outage
-   * means a robotic voice, not total silence.
+   * backend omitted `audio` (Hume outage server-side) or local playback
+   * setup fails, so that means a robotic voice, not total silence.
    */
   const speakResponse = useCallback(
-    async (text: string) => {
+    (text: string, audioBase64?: string) => {
       console.log(`${LOG_TAG} speaking response aloud`);
       setStatus('speaking');
       shouldBeListeningRef.current = true;
@@ -266,20 +289,20 @@ export default function App() {
         finishSpeaking();
       }, fallbackMs);
 
-      if (!HUME_API_KEY) {
-        console.log(`${LOG_TAG} no EXPO_PUBLIC_HUME_API_KEY set - using device voice`);
-        Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
-        return;
+      if (audioBase64) {
+        try {
+          const uri = writeAudioToTempFile(audioBase64);
+          ttsPlayer.replace({ uri });
+          ttsPlayer.play();
+          return;
+        } catch (error) {
+          console.log(`${LOG_TAG} failed to play backend audio, falling back to device voice:`, (error as Error).message);
+        }
+      } else {
+        console.log(`${LOG_TAG} no audio in gateway response - using device voice`);
       }
 
-      try {
-        const { uri } = await synthesizeSpeech(HUME_API_KEY, text, SPEECH_RATE);
-        ttsPlayer.replace({ uri });
-        ttsPlayer.play();
-      } catch (error) {
-        console.log(`${LOG_TAG} Hume TTS failed, falling back to device voice:`, (error as Error).message);
-        Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
-      }
+      Speech.speak(text, { pitch: SPEECH_PITCH, rate: SPEECH_RATE, onDone: finishSpeaking, onError: finishSpeaking });
     },
     [clearResetTimer, finishSpeaking, ttsPlayer],
   );
@@ -307,10 +330,11 @@ export default function App() {
         // AL-TRON's TransformInterceptor wraps responses as { data: {...} };
         // fall back to a flat shape too in case that ever changes.
         const completion: string | undefined = data?.data?.completion ?? data?.completion;
-        console.log(`${LOG_TAG} gateway responded:`, completion);
+        const audio: string | undefined = data?.data?.audio ?? data?.audio;
+        console.log(`${LOG_TAG} gateway responded:`, completion, audio ? '(+audio)' : '(no audio)');
         const text = completion || 'AL-TRON returned an empty response.';
         setResponseText(text);
-        void speakResponse(text);
+        speakResponse(text, audio);
       } catch (err) {
         const message = axios.isAxiosError(err)
           ? (err.response?.data?.message ?? err.message)

@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import { AiRequestStatus } from '@prisma/client';
 import { catchError, firstValueFrom } from 'rxjs';
 import { AuthUser } from '../../common/interfaces/auth-user.interface';
+import { HumeTtsService } from '../hume/hume-tts.service';
 import { MemorySearchResultDto } from '../memory/dto/memory-search-result.dto';
 import { MemoryService } from '../memory/memory.service';
 import { CreateMemoryDto } from '../memory/dto/create-memory.dto';
@@ -154,6 +155,7 @@ export class AiService {
     private readonly configService: ConfigService,
     private readonly memoryService: MemoryService,
     private readonly personaService: PersonaService,
+    private readonly humeTtsService: HumeTtsService,
   ) {
     this.baseUrl = this.configService.get<string>('githubModels.baseUrl') as string;
     this.token = this.configService.get<string>('githubModels.token') as string;
@@ -479,14 +481,22 @@ Behavioral Directives:
     }));
   }
 
-  /** Records this turn in the session's rolling history, then passes the result through unchanged. */
+  /**
+   * Records this turn in the session's rolling history and synthesizes speech
+   * for `result.completion` via Hume, run concurrently since neither depends
+   * on the other. `audio` is omitted (not thrown) if synthesis fails - see
+   * HumeTtsService.
+   */
   private async finalizeTurn<T extends { completion: string }>(
     userId: string,
     prompt: string,
     result: T,
-  ): Promise<T> {
-    await this.personaService.recordTurn(userId, prompt, result.completion);
-    return result;
+  ): Promise<T & { audio?: string }> {
+    const [, audio] = await Promise.all([
+      this.personaService.recordTurn(userId, prompt, result.completion),
+      this.humeTtsService.synthesizeSpeech(result.completion),
+    ]);
+    return { ...result, audio: audio ?? undefined };
   }
 
   private async chatCompletion(

@@ -45,6 +45,10 @@ export default () => ({
     ),
   },
 
+  hume: {
+    apiKey: process.env.HUME_API_KEY,
+  },
+
   throttle: {
     default: {
       ttl: parseInt(process.env.THROTTLE_DEFAULT_TTL_MS as string, 10),

@@ -24,6 +24,8 @@ export const validationSchema = Joi.object({
   REDIS_URL: Joi.string().uri().required(),
   PERSONA_SESSION_TTL_SECONDS: Joi.number().default(21600),
 
+  HUME_API_KEY: Joi.string().required(),
+
   THROTTLE_DEFAULT_TTL_MS: Joi.number().default(60000),
   THROTTLE_DEFAULT_LIMIT: Joi.number().default(100),
   THROTTLE_AI_TTL_MS: Joi.number().default(60000),
