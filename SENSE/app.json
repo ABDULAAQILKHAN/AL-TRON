@@ -42,7 +42,8 @@
         }
       ],
       "expo-audio",
-      "expo-asset"
+      "expo-asset",
+      "expo-secure-store"
     ],
     "web": {
       "favicon": "./assets/favicon.png"

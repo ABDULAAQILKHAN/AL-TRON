@@ -1,0 +1,37 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: altron-engine:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    # DATABASE_URL (Neon) and MONGO_DB_URL (Atlas) are cloud-hosted - this
+    # compose file doesn't run Postgres/Mongo containers, it just needs the
+    # rest of .env (AUTH-PRO, GitHub Models PAT, Hume key, throttle config, ...).
+    env_file:
+      - .env
+    environment:
+      # .env's REDIS_URL=redis://localhost:6379 means "this container" once
+      # inside Docker, not the redis service below - point it at the service
+      # name on the compose network instead.
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  redis-data:

@@ -59,8 +59,14 @@ export class UsersService {
     return data;
   }
 
-  /** Keeps the local shadow row (used for foreign keys, e.g. AiRequestLog) in sync with AUTH-PRO. */
-  private async upsertShadow(user: AuthUser): Promise<void> {
+  /**
+   * Keeps the local shadow row (used for foreign keys, e.g. AiRequestLog) in
+   * sync with AUTH-PRO. Public - AuthProGuard also calls this on every
+   * authenticated request, not just the /users/* routes here, so the shadow
+   * row is guaranteed to exist before any other guarded endpoint (e.g.
+   * /ai/prompt) tries to foreign-key against it.
+   */
+  async upsertShadow(user: AuthUser): Promise<void> {
     await this.prisma.user.upsert({
       where: { id: user.id },
       create: {

@@ -13,18 +13,22 @@ import {
   type ExpoSpeechRecognitionOptions,
 } from 'expo-speech-recognition';
 import AltronOrb3D, { type OrbVoiceState } from './components/AltronOrb3D';
+import LoginScreen from './components/LoginScreen';
 import { base64ToUint8Array } from './services/hume/base64';
+import { clearToken, getStoredToken, storeToken } from './services/auth';
 
 // --- Gateway config ------------------------------------------------------
-// Both values come from `.env` (see `.env.example`). EXPO_PUBLIC_* vars are
-// inlined into the JS bundle by Expo at build time - never put real secrets
-// behind that prefix, only dev-time convenience values like these.
+// EXPO_PUBLIC_* vars are inlined into the JS bundle by Expo at build time -
+// never put a real secret behind that prefix. The auth token is NOT one of
+// these anymore (see services/auth.ts) - it's obtained via a real AUTH-PRO
+// login and kept in SecureStore, not baked into the bundle.
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://<YOUR_BACKEND_IP>:3000/ai/prompt';
-const MOCK_AUTH_TOKEN = process.env.EXPO_PUBLIC_MOCK_AUTH_TOKEN ?? 'mock-dev-token';
 // /ai/prompt/stream is the SSE sibling of /ai/prompt (see ai.controller.ts) -
 // same route, same auth, just chunked so interim status events can arrive
 // before the final result.
 const STREAM_URL = BACKEND_URL.replace(/\/prompt\/?$/, '/prompt/stream');
+// Base gateway URL (no /ai/prompt suffix) - LoginScreen needs this for /auth/login.
+const API_BASE_URL = BACKEND_URL.replace(/\/ai\/prompt\/?$/, '');
 
 // Mirrors ALTRON_ENGINE's PromptStatusStage ('remembering' | 'saving'),
 // plus 'thinking' which the backend emits the instant a request lands
@@ -74,7 +78,10 @@ function writeAudioToTempFile(base64Mp3: string): string {
 // "Ultron" (a very well-known proper noun from the Avengers films) - on-device
 // logs confirm the recognizer's language model consistently favors "Ultron"
 // over the essentially-unknown "Altron". Accept both rather than fight it.
-const WAKE_WORD_VARIANTS = ['altron', 'ultron'];
+// "Jarvis" is accepted too. All entries must stay lowercase - containsWakeWord
+// only lowercases the transcript, not these variants, so a capitalized entry
+// here can never match anything.
+const WAKE_WORD_VARIANTS = ['altron', 'ultron', 'jarvis'];
 
 function containsWakeWord(text: string): boolean {
   const lower = text.toLowerCase();
@@ -194,6 +201,12 @@ function toOrbVoiceState(status: GatewayStatus): OrbVoiceState {
 }
 
 export default function App() {
+  // null = not logged in (or not checked yet); authChecked distinguishes
+  // "still reading SecureStore" from "checked, and there's genuinely no
+  // token" so the login screen doesn't flash on every cold start.
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [status, setStatus] = useState<GatewayStatus>('initializing');
   const [rawTranscript, setRawTranscript] = useState('');
   const [activePrompt, setActivePrompt] = useState('');
@@ -238,6 +251,36 @@ export default function App() {
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  // Read whatever token LoginScreen previously stored, once, on cold start.
+  // Errors (e.g. expo-secure-store's native module not yet linked into the
+  // currently-installed build) must still resolve to "show the login screen"
+  // rather than leaving authChecked stuck false - the blank pre-auth screen
+  // renders forever otherwise, which looks exactly like the app hanging.
+  useEffect(() => {
+    (async () => {
+      try {
+        const stored = await getStoredToken();
+        setAuthToken(stored);
+      } catch (err) {
+        console.log(`${LOG_TAG} failed to read stored auth token:`, (err as Error).message);
+        setAuthToken(null);
+      } finally {
+        setAuthChecked(true);
+      }
+    })();
+  }, []);
+
+  const handleLogin = useCallback((token: string) => {
+    void storeToken(token);
+    setAuthToken(token);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    void clearToken();
+    setAuthToken(null);
+    setStatus('initializing');
+  }, []);
 
   const clearResetTimer = useCallback(() => {
     if (resetTimerRef.current) {
@@ -387,12 +430,21 @@ export default function App() {
         const response = await expoFetch(STREAM_URL, {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${MOCK_AUTH_TOKEN}`,
+            Authorization: `Bearer ${authToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ prompt }),
           signal: controller.signal,
         });
+
+        if (response.status === 401) {
+          // Token was rejected (expired/revoked) - drop it so the render
+          // below falls back to LoginScreen instead of endlessly re-401ing.
+          console.log(`${LOG_TAG} session expired/invalid - returning to login`);
+          void clearToken();
+          setAuthToken(null);
+          throw new Error('Your session expired - please log in again.');
+        }
 
         if (!response.ok || !response.body) {
           throw new Error(`Gateway responded ${response.status}`);
@@ -450,7 +502,7 @@ export default function App() {
         clearTimeout(abortTimer);
       }
     },
-    [clipPlayer, scheduleReturnToStandby, speakResponse, speakStatus],
+    [authToken, clipPlayer, scheduleReturnToStandby, speakResponse, speakStatus],
   );
 
   /**
@@ -484,8 +536,15 @@ export default function App() {
     triggerCapture('manual');
   }, [triggerCapture]);
 
-  // --- Permission + first mic start on mount ------------------------------
+  // --- Permission + first mic start, once logged in -----------------------
+  // Gated on authToken so the mic never starts (and can't fire submitPrompt
+  // against a 401) before LoginScreen hands back a real token. Re-runs on
+  // logout too - the cleanup below stops the mic, then this body sees
+  // authToken is null and returns before starting anything new.
   useEffect(() => {
+    if (!authToken) {
+      return;
+    }
     let cancelled = false;
 
     (async () => {
@@ -528,7 +587,7 @@ export default function App() {
       clipPlayer.pause();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authToken]);
 
   // --- Continuous listen loop: restart the session whenever it ends and we -
   // still want the mic on. This is what makes listening "continuous" even on
@@ -624,6 +683,20 @@ export default function App() {
     }
   });
 
+  if (!authChecked) {
+    // Reading SecureStore - deliberately blank rather than flashing the
+    // login screen for a frame on every cold start.
+    return (
+      <SafeAreaView style={styles.screen}>
+        <StatusBar style="light" />
+      </SafeAreaView>
+    );
+  }
+
+  if (!authToken) {
+    return <LoginScreen apiBaseUrl={API_BASE_URL} onLogin={handleLogin} />;
+  }
+
   const config = STATUS_CONFIG[status];
   const statusLabel =
     status === 'transmitting' && processingStage ? PROCESSING_LABELS[processingStage] : config.label;
@@ -640,6 +713,11 @@ export default function App() {
       <View style={styles.header}>
         <Text style={styles.wordmark}>AL·TRON</Text>
         <Text style={styles.subWordmark}>SENSE INTERFACE</Text>
+        {canTapToSpeak ? (
+          <Pressable onPress={handleLogout} hitSlop={12} style={styles.logoutButton}>
+            <Text style={styles.logoutText}>LOG OUT</Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <Pressable
@@ -729,6 +807,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 4,
     marginTop: 4,
+  },
+  logoutButton: {
+    marginTop: 10,
+  },
+  logoutText: {
+    color: '#444444',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 2,
   },
   center: {
     flex: 1,

@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { AxiosError } from 'axios';
 import { catchError, firstValueFrom } from 'rxjs';
+import { UsersService } from '../../modules/users/users.service';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { AuthenticatedRequest, AuthUser } from '../interfaces/auth-user.interface';
 
@@ -20,6 +21,7 @@ export class AuthProGuard implements CanActivate {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
     private readonly reflector: Reflector,
+    private readonly usersService: UsersService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -39,6 +41,12 @@ export class AuthProGuard implements CanActivate {
     }
 
     const user = await this.verifyWithAuthPro(token);
+    // Guarantees the local shadow row exists before ANY guarded endpoint runs
+    // - not just /users/*. Without this, a client that logs in and goes
+    // straight to e.g. /ai/prompt (skipping /users/me entirely) hits a
+    // foreign-key violation on AiRequestLog.userId for a row that was never
+    // created.
+    await this.usersService.upsertShadow(user);
 
     request.user = user;
     request.accessToken = token;
